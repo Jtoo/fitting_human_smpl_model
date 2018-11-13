@@ -33,7 +33,7 @@ NUM_SMPL_VERTS = 6890
 # 15, LAnkle    7
 # 16, RAnkle    8
 # [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20. 21, 22, 23]
-# [-1, 11, 12, -1，13, 14, -1, 15, 16, -1, -1, -1, -1, -1, -1. -1.  5,  6,  7,  8,  9, 10, -1, -1]
+# [-1, 11, 12, -1, 13, 14, -1, 15, 16, -1, -1, -1, -1, -1, -1, -1,  5,  6,  7,  8,  9, 10, -1, -1]
 
 def main():
 
@@ -51,11 +51,9 @@ def main():
   DP = dp_utils.DensePoseMethods()
   pkl_file = open('../data/demo_dp_single_ann.pkl', 'rb')
   Demo = pickle.load(pkl_file)
-
-  # collect respective points on SMPL model
-  collected_x = np.zeros(Demo['x'].shape)
-  collected_y = np.zeros(Demo['x'].shape)
-  collected_z = np.zeros(Demo['x'].shape)
+  # reverse y axis
+  Demo['y'] = 350 - Demo['y']
+  Demo['ICrop']= Demo['ICrop'][::-1, :]
 
   info_list = []
   for i, (ii,uu,vv) in enumerate(zip(Demo['I'],Demo['U'],Demo['V'])):
@@ -63,9 +61,9 @@ def main():
     FaceIndex,bc1,bc2,bc3 = DP.IUV2FBC(ii,uu,vv)
     # Use FBC to get 3D coordinates on the surface.
     p, info = DP.FBC2PointOnSurface(FaceIndex, bc1,bc2,bc3, Vertices)
-    collected_x[i] = p[0]
-    collected_y[i] = p[1]
-    collected_z[i] = p[2]
+    # collected_x[i] = p[0]
+    # collected_y[i] = p[1]
+    # collected_z[i] = p[2]
     info_list.append(info)
 
   weight_map = np.zeros([NUM_SMPL_VERTS], dtype=np.float32)
@@ -84,20 +82,24 @@ def main():
 
   # load 2d keypoints info
   keypoints_info = json.load(open("../data/icrop.json"))
-  kps = keypoints_info["keypoints"]
+  kps = np.array(keypoints_info["keypoints"])
+  kps = np.hstack((kps, [0, 0, 0]))
   kps = kps.reshape([1, -1, 3])
-  kps = np.vstack((kps, [0, 0, 0]))
   kp_weights = kps[:, :, 2]
   kps = kps[:, :, :2]
+  kps[:, :, 1] = 350 - kps[:, :, 1] # reverse y axis
 
   #  [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20. 21, 22, 23]
-  kps_map_coco_to_smpl = [
-      -1, 11, 12, -1, 13, 14, -1, 15, 16, -1, -1, -1, -1, -1, -1, -1,  5,  6,  7,  8,  9, 10, -1, -1]
+  kps_map_coco_to_smpl = (
+      -1, 11, 12, -1, 13, 14, -1, 15, 16, -1, -1, -1, -1, -1, -1, -1,  5,  6,  7,  8,  9, 10, -1, -1)
 
-  kps = kps[:, kps_map_coco_to_smpl, :]
-  kp_weights = kp_weights[:, kps_map_coco_to_smpl, :]
+  # kps = kps[:, kps_map_coco_to_smpl, :]
+  # kp_weights = kp_weights[:, kps_map_coco_to_smpl]
 
-  model = Model(SMPL_MODEL_PATH)
+  print("kps:", kps.shape, kps)
+  print("kp_weights:", kp_weights.shape, kp_weights)
+
+  model = Model(SMPL_MODEL_PATH, "../models/gmm_08.pkl")
   (index_map, img_verts, proj_verts_2d_op) = model.build_model()
 
   with tf.Session() as sess:
@@ -128,9 +130,9 @@ def main():
       print("proj_verts_2d.shape:", proj_verts_2d.shape)
 
       # Visualize the image and collected points.
-      fig = plt.figure(figsize=[12,12])
+      fig = plt.figure(figsize=[8, 8])
       ax = fig.add_subplot(221)
-      ax.imshow(Demo['ICrop'])
+      ax.imshow(Demo['ICrop'], origin="lower")
       ax.scatter(Demo['x'],Demo['y'],11, np.arange(len(Demo['y'])))
       plt.title('Points on the image')
       ax.axis('equal')
@@ -142,24 +144,25 @@ def main():
       ax.scatter(collected_x, collected_y, s=25, c=np.arange(len(collected_x)))
       ax.set_xlim([0, 350])
       ax.set_ylim([0, 350])
-      ax.invert_yaxis()
       plt.title('Points on the SMPL model')
-      plt.show()
 
       # original picture with 2D keypoints
       ax = fig.add_subplot(223)
-      ax.imshow(Demo['ICrop'])
-      ax.scatter(kps[0, :, 0], kps[0, :, 0], s=30, c=np.arange(len(kps_map_coco_to_smpl)))
+      ax.imshow(Demo['ICrop'], origin="lower")
+      ax.scatter(kps[0, :, 0], kps[0, :, 1], s=30, c=np.arange(len(kps[0, :, 0])))
       ax.set_xlim([0, 350])
       ax.set_ylim([0, 350])
       plt.title('2D keypoints on the original image')
 
       ax = fig.add_subplot(224)
-      ax.imshow(Demo['ICrop'])
-      ax.scatter(proj_joints_2d[0, :, 0], proj_joints_2d[0, :, 0], s=30, c=np.arange(len(kps_map_coco_to_smpl)))
+      ax.scatter(X, Y, s=0.02,c='k')
+      ax.scatter(proj_joints_2d[0, :, 0], proj_joints_2d[0, :, 1], s=30, c=np.arange(len(proj_joints_2d[0, :, 0])))
       ax.set_xlim([0, 350])
       ax.set_ylim([0, 350])
       plt.title('2D keypoints on the smpl model')
+
+      plt.tight_layout()
+      plt.show()
 
     # draw the initial pose
     show_step()
@@ -179,7 +182,7 @@ def main():
     for step in range(steps_in_all):
       angle_weight = angle_prior_weights[step // (steps_in_all//len(angle_prior_weights))]
       _, angle_prior_loss,  lossVal = sess.run(
-          [model.train_op_poses, model.angle_prior_loss,  model.loss_op],
+          [model.train_op_all, model.angle_prior_loss,  model.loss_op],
           feed_dict={index_map: weight_map,
                      img_verts: visible_points2d,
                      model.learning_rate: 0.01,

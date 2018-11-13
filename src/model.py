@@ -5,10 +5,11 @@ import tensorflow as tf
 from tf_smpl.projection import batch_orth_proj_idrot
 from tf_smpl.batch_smpl import SMPL
 
-from tensorflow.contrib.distributions import MultivariateNormalFullCovariance
+import tensorflow_probability as tfp
+tfd = tfp.distributions
 
 NUM_SMPL_VERTS = 6890
-NUM_KEY_JOINTS = 24
+NUM_KEY_JOINTS = 19
 
 class MaxMixtureCompletePrior:
   def __init__(self, gaussians_params_path, n_gaussians=8, prefix=3):
@@ -21,9 +22,10 @@ class MaxMixtureCompletePrior:
     self.covars = tf.constant(gmm["covars"], dtype=tf.float32)
     self.means = tf.constant(gmm["means"], dtype=tf.float32)
     self.weights = tf.constant(gmm["weights"], dtype=tf.float32)
-    self.mvns = [MultivariateNormalFullCovariance(
+    self.mvns = [tfd.MultivariateNormalFullCovariance(
       loc=mu, covariance_matrix=cov) for (mu, cov) in zip(
-        self.means, self.covars)]
+        gmm["means"], gmm["covars"])]
+    print("mvns.type:", type(self.mvns))
 
   def __call__(self, pose):
     sketon_pose = pose[:, 3:] # without the global rotation
@@ -36,7 +38,6 @@ class Model:
   def __init__(self, smpl_model_path, gaussians_params_path):
     self.smplModel = SMPL(smpl_model_path)
     self.gussians_prior = MaxMixtureCompletePrior(gaussians_params_path)
-
 
   def calulate_angle_prior_loss(self):
     # joint angles pose prior, defined over a subset of pose parameters:
@@ -75,21 +76,19 @@ class Model:
           initial_cams, name='cameras', dtype=tf.float32)
 
     self.verts_3d, self.joints_3d, _ = self.smplModel(self.shapes, self.poses, get_skin=True)
-    # reverse x axis
-    self.verts_3d = self.verts_3d * tf.constant([1, -1, 1], dtype=tf.float32)
     self.proj_verts_2d = batch_orth_proj_idrot(self.verts_3d, self.cams, name='proj_verts_2d')
     self.proj_joints_2d = batch_orth_proj_idrot(self.joints_3d, self.cams, name='proj_verts_2d')
 
     # for keypoints
     real_keypoints_2d = tf.placeholder(
-      shape=[1, NUM_KEY_JOINTS], dtype=tf.float32, name="real_keypoints_2d")
+      shape=[1, NUM_KEY_JOINTS, 2], dtype=tf.float32, name="real_keypoints_2d")
     weights_keypoints_2d = tf.placeholder(
       shape=[1, NUM_KEY_JOINTS], dtype=tf.float32, name="weights_keypoints_2d")
 
     weights_keypoints_2d_expanded = tf.expand_dims(weights_keypoints_2d, 2)
     weights_keypoints_2d_expanded = tf.tile(weights_keypoints_2d_expanded, [1, 1, 2])
 
-    self.joints_loss = tf.mean(
+    self.joints_loss = tf.reduce_mean(
         weights_keypoints_2d_expanded * tf.square(real_keypoints_2d-self.proj_joints_2d), axis=1)
 
     # dense points error
@@ -101,9 +100,9 @@ class Model:
     index_map_expanded = tf.expand_dims(index_map, 2)
     index_map_expanded = tf.tile(index_map_expanded, [1, 1, 2])
 
-    self.dense_point_loss = tf.sum(index_map_expanded * tf.square(self.proj_verts_2d - img_verts), axis=1)
-    num_visible_points = tf.sum(index_map_expanded, axis=1)
-    self.dense_point_loss = self.dense_point_loss / num_visible_points
+    self.dense_point_loss = tf.reduce_sum(index_map_expanded * tf.square(self.proj_verts_2d - img_verts))
+    num_visible_points = tf.reduce_sum(index_map_expanded)
+    self.dense_point_loss = 0.01 * tf.divide(self.dense_point_loss, num_visible_points)
 
     self.angle_prior_loss = self.calulate_angle_prior_loss()
     # self.loss_op = self.dense_point_loss + self.angle_prior_loss
