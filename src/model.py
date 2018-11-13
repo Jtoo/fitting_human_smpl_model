@@ -1,15 +1,42 @@
 
+import pickle
 import numpy as np
 import tensorflow as tf
 from tf_smpl.projection import batch_orth_proj_idrot
 from tf_smpl.batch_smpl import SMPL
 
+from tensorflow.contrib.distributions import MultivariateNormalFullCovariance
+
 NUM_SMPL_VERTS = 6890
+NUM_KEY_JOINTS = 24
+
+class MaxMixtureCompletePrior:
+  def __init__(self, gaussians_params_path, n_gaussians=8, prefix=3):
+    self.n_gaussians = n_gaussians
+    self.prefix = prefix
+    self.create_prior_from_cmu(gaussians_params_path)
+
+  def create_prior_from_cmu(self, gaussians_params_path):
+    gmm = pickle.load(open(gaussians_params_path, 'r'))
+    self.covars = tf.constant(gmm["covars"], dtype=tf.float32)
+    self.means = tf.constant(gmm["means"], dtype=tf.float32)
+    self.weights = tf.constant(gmm["weights"], dtype=tf.float32)
+    self.mvns = [MultivariateNormalFullCovariance(
+      loc=mu, covariance_matrix=cov) for (mu, cov) in zip(
+        self.means, self.covars)]
+
+  def __call__(self, pose):
+    sketon_pose = pose[:, 3:] # without the global rotation
+    log_probs = tf.hstack([mvn.log_prob(sketon_pose) for mvn in self.mvns])
+    max_index = tf.argmax(log_probs, axis=1)
+    return -self.means[max_index]*log_probs[max_index]
 
 
 class Model:
-  def __init__(self, smpl_model_path):
+  def __init__(self, smpl_model_path, gaussians_params_path):
     self.smplModel = SMPL(smpl_model_path)
+    self.gussians_prior = MaxMixtureCompletePrior(gaussians_params_path)
+
 
   def calulate_angle_prior_loss(self):
     # joint angles pose prior, defined over a subset of pose parameters:
@@ -47,12 +74,25 @@ class Model:
       self.cams = tf.Variable(
           initial_cams, name='cameras', dtype=tf.float32)
 
-    self.verts_3d, Js, _ = self.smplModel(self.shapes, self.poses, get_skin=True)
-
+    self.verts_3d, self.joints_3d, _ = self.smplModel(self.shapes, self.poses, get_skin=True)
+    # reverse x axis
     self.verts_3d = self.verts_3d * tf.constant([1, -1, 1], dtype=tf.float32)
-
     self.proj_verts_2d = batch_orth_proj_idrot(self.verts_3d, self.cams, name='proj_verts_2d')
+    self.proj_joints_2d = batch_orth_proj_idrot(self.joints_3d, self.cams, name='proj_verts_2d')
 
+    # for keypoints
+    real_keypoints_2d = tf.placeholder(
+      shape=[1, NUM_KEY_JOINTS], dtype=tf.float32, name="real_keypoints_2d")
+    weights_keypoints_2d = tf.placeholder(
+      shape=[1, NUM_KEY_JOINTS], dtype=tf.float32, name="weights_keypoints_2d")
+
+    weights_keypoints_2d_expanded = tf.expand_dims(weights_keypoints_2d, 2)
+    weights_keypoints_2d_expanded = tf.tile(weights_keypoints_2d_expanded, [1, 1, 2])
+
+    self.joints_loss = tf.mean(
+        weights_keypoints_2d_expanded * tf.square(real_keypoints_2d-self.proj_joints_2d), axis=1)
+
+    # dense points error
     index_map = tf.placeholder(
       shape=[1, NUM_SMPL_VERTS], dtype=tf.float32, name="visible_point_index_map")
     img_verts = tf.placeholder(
@@ -61,8 +101,9 @@ class Model:
     index_map_expanded = tf.expand_dims(index_map, 2)
     index_map_expanded = tf.tile(index_map_expanded, [1, 1, 2])
 
-    self.visible_pred_verts = self.proj_verts_2d * index_map_expanded
-    self.dense_point_loss = tf.reduce_mean(tf.losses.absolute_difference(self.visible_pred_verts, img_verts))
+    self.dense_point_loss = tf.sum(index_map_expanded * tf.square(self.proj_verts_2d - img_verts), axis=1)
+    num_visible_points = tf.sum(index_map_expanded, axis=1)
+    self.dense_point_loss = self.dense_point_loss / num_visible_points
 
     self.angle_prior_loss = self.calulate_angle_prior_loss()
     # self.loss_op = self.dense_point_loss + self.angle_prior_loss
