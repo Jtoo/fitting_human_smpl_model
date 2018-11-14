@@ -117,9 +117,10 @@ def main():
     lps_weights = sess.run(model.smplModel.weights)
     print("lbs_weights.sum: %s" % str(np.sum(lps_weights)))
 
-    def show_step():
-      proj_verts_2d, proj_joints_2d, poses, shapes = sess.run(
-          [model.proj_verts_2d, model.proj_joints_2d, model.poses, model.shapes])
+    lossValsList = []
+    def show_step(title=""):
+      proj_verts_2d, proj_joints_2d, poses, shapes, cameras = sess.run(
+          [model.proj_verts_2d, model.proj_joints_2d, model.poses, model.shapes, model.cams])
       X,Y = proj_verts_2d[0, :,0], proj_verts_2d[0, :,1]
       collected_x = np.zeros(len(info_list))
       collected_y = np.zeros(len(info_list))
@@ -128,6 +129,7 @@ def main():
         collected_x[i] = X[i1]*w1 + X[i2]*w2 + X[i3]*w3
         collected_y[i] = Y[i1]*w1 + Y[i2]*w2 + Y[i3]*w3
 
+      print("cameras: %s" % str(cameras))
       print("poses.std: %s" % str(np.std(poses)))
       print("shapes: %s" % str(shapes))
       # print("X.sum: %s" % str(np.sum(X)))
@@ -135,8 +137,8 @@ def main():
       print("proj_verts_2d.shape:", proj_verts_2d.shape)
 
       # Visualize the image and collected points.
-      fig = plt.figure(figsize=[8, 8])
-      ax = fig.add_subplot(221)
+      fig = plt.figure(figsize=[12, 8])
+      ax = fig.add_subplot(231)
       ax.imshow(Demo['ICrop'], origin="lower")
       ax.scatter(Demo['x'],Demo['y'],11, np.arange(len(Demo['y'])))
       plt.title('Points on the image')
@@ -144,32 +146,65 @@ def main():
       # ax.axis('off')
 
       ## Visualize the full body smpl male template model and collected points
-      ax = fig.add_subplot(222)
+      ax = fig.add_subplot(232)
       ax.scatter(X, Y, s=0.02,c='k')
       ax.scatter(collected_x, collected_y, s=25, c=np.arange(len(collected_x)))
       ax.set_xlim([0, 350])
       ax.set_ylim([0, 350])
       plt.title('Points on the SMPL model')
 
-      # original picture with 2D keypoints
-      ax = fig.add_subplot(223)
+      # overlap
+      ax = fig.add_subplot(233)
       ax.imshow(Demo['ICrop'], origin="lower")
-      ax.scatter(kps[0, :, 0], kps[0, :, 1], s=30, c=np.arange(len(kps[0, :, 0])))
-      for index, (px, py) in enumerate(kps[0]):
-        ax.text(px+5, py, str(index), size=12, color='r')
+      ax.scatter(Demo['x'],Demo['y'], 8, c='r')
+      ax.scatter(X, Y, s=0.02, c='k')
+      ax.scatter(collected_x, collected_y, s=25, c=np.arange(len(collected_x)))
+      ax.set_xlim([0, 350])
+      ax.set_ylim([0, 350])
+      plt.title('Points on the SMPL model')
+
+      # original picture with 2D keypoints
+      # ax = fig.add_subplot(234)
+      # ax.imshow(Demo['ICrop'], origin="lower")
+      # ax.scatter(kps[0, :, 0], kps[0, :, 1], s=30, c=np.arange(len(kps[0, :, 0])))
+      # for index, (px, py) in enumerate(kps[0]):
+      #   ax.text(px+5, py, str(index), size=12, color='r')
+      # ax.set_xlim([0, 350])
+      # ax.set_ylim([0, 350])
+      # plt.title('2D keypoints on the original image')
+
+      # ax = fig.add_subplot(235)
+      # ax.scatter(X, Y, s=0.02,c='k')
+      # ax.scatter(proj_joints_2d[0, :, 0], proj_joints_2d[0, :, 1], s=30, c=np.arange(len(proj_joints_2d[0, :, 0])))
+      # for index, (px, py) in enumerate(proj_joints_2d[0]):
+      #   ax.text(px+5, py, str(index), size=12, color='r')
+      # ax.set_xlim([0, 350])
+      # ax.set_ylim([0, 350])
+      # plt.title('2D keypoints on the smpl model')
+
+      # overlap
+      ax = fig.add_subplot(234)
+      ax.imshow(Demo['ICrop'], origin="lower")
+      ax.scatter(kps[0, :, 0], kps[0, :, 1], s=10, c='r')
+      ax.scatter(X, Y, s=0.02, c='k')
+      ax.scatter(proj_joints_2d[0, :, 0], proj_joints_2d[0, :, 1], s=20, c=np.arange(len(proj_joints_2d[0, :, 0])))
+      for index, (px, py) in enumerate(proj_joints_2d[0]):
+        ax.text(px+2, py, str(index), size=10, color='r')
       ax.set_xlim([0, 350])
       ax.set_ylim([0, 350])
       plt.title('2D keypoints on the original image')
 
-      ax = fig.add_subplot(224)
-      ax.scatter(X, Y, s=0.02,c='k')
-      ax.scatter(proj_joints_2d[0, :, 0], proj_joints_2d[0, :, 1], s=30, c=np.arange(len(proj_joints_2d[0, :, 0])))
-      for index, (px, py) in enumerate(proj_joints_2d[0]):
-        ax.text(px+5, py, str(index), size=12, color='r')
-      ax.set_xlim([0, 350])
-      ax.set_ylim([0, 350])
-      plt.title('2D keypoints on the smpl model')
+      # draw loss value
+      losses = np.asarray(lossValsList)
+      ax = fig.add_subplot(235)
+      if len(lossValsList) > 0:
+        for index in range(len(lossValsList[0])):
+          ax.plot(losses[:, index])
+        ax.legend(["kps2d", "angle", "gussians", "shapes", "dense_points"])
+      plt.title('Loss values')
 
+      if len(title) > 0:
+        fig.canvas.set_window_title(title)
       plt.tight_layout()
       plt.show()
 
@@ -188,22 +223,20 @@ def main():
           [model.train_op_cams, model.loss_op, model.cams],
           feed_dict=feed)
       print("step: %d, loss: %s, %s" % (step, str(lossVal), str(cameras)))
-      if step % 24 == 0:
-        show_step()
+    show_step()
 
     opt_weights = zip([4.04 * 1e2, 4.04 * 1e2, 57.4, 4.78],
-                      [1e2, 5 * 1e1, 1e1, .5 * 1e1])
-    steps_per_stage = 1000
-    for stage, (prior_weight, shapes_weight) in enumerate(opt_weights):
-      for step in range(steps_per_stage):
+                      [1e2, 5 * 1e1, 1e1, .5 * 1e1],
+                      [400, 600, 800, 4000])
+    for stage, (prior_weight, shapes_weight, steps_on_stage) in enumerate(opt_weights):
+      for step in range(steps_on_stage):
         # kps2d, angle, gussians, shapes, dense_points
-        # weights = [1.0, 0.317*prior_weight, prior_weight, 0, 0]
-        weights = [2.0, 0.317*prior_weight, 10/((stage+1)), 0, 0.1]
+        weights = [8.0*(stage+1), 0.317*prior_weight, 10/((stage+1)), 2, 2]
         feed = {model.real_keypoints_2d: kps,
                 model.weights_keypoints_2d: kps_weights,
                 index_map: weight_map,
                 img_verts: visible_points2d,
-                model.learning_rate: 0.0002,
+                model.learning_rate: 0.002/(stage+1),
                 model.losses_weights: weights}
         (_, lossVal,
             joints_loss,
@@ -221,9 +254,11 @@ def main():
         print("stage: %d, step: %d, loss: %s" % (stage, step, str(lossVal)))
         print("kps2d: %f, angle: %f, gussians: %f, shapes_loss: %f, dense: %f" %
               (joints_loss, angle_prior_loss, gussians_prior_loss, shapes_loss, dense_point_loss))
+        lossValsList.append(lossVal)
         if step % 200 == 0:
-          show_step()
-    show_step()
+          show_step("Stage: %d, step: %d" % (stage, step))
+    show_step("Stage: %d, step: %d" % (stage, step))
+
 
 if __name__ == "__main__":
   main()

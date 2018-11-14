@@ -30,13 +30,32 @@ class MaxMixtureCompletePrior:
     print("dtype(self.mvns):", self.mvns[0].dtype)
     print("dtype(self.mix_gauss):", self.mix_gauss.dtype)
 
-  def __call__(self, pose):
-    # pose.shape: [N, 72]
-    sketon_pose = pose[:, 3:] # poses without the global rotation
+  def max_gussians_prior(self, sketon_pose):
+    weights = tf.constant(self.weights, dtype=tf.float32) # shape: [8]
+    # sketon_pose.shape: [N, 69]
+    log_probs = tf.stack([mvn.log_prob(sketon_pose) for mvn in self.mvns], axis=1) # log_probs.shape: [N, 8]
+    print("log_probs.shape:", log_probs.shape)
+    indices_of_max = tf.argmax(log_probs, axis=1) # shapes: [N]
+    print("indices_of_max.shape:", indices_of_max.shape)
+    selected_weights = tf.gather(weights, indices_of_max) # shape: [N]
+    print("selected_weights.shape:", selected_weights.shape)
+    log_prob_weighted = selected_weights * tf.reduce_max(log_probs, axis=1)
+    print("log_prob_weighted.shape:", log_prob_weighted.shape)
+    loss = -log_prob_weighted
+    loss = tf.reduce_sum(loss) # sum over batches, here we only use 1 batch, N=1
+    return loss
+
+  def average_mixture_loss(self, sketon_pose):
     print("dtype(sketon_pose):", sketon_pose.dtype)
     loss = -self.mix_gauss.log_prob(sketon_pose)
     loss = tf.reduce_sum(loss) # sum over batches, here we only use 1 batch
     return loss
+
+  def __call__(self, pose):
+    # pose.shape: [N, 72]
+    sketon_pose = pose[:, 3:] # poses without the global rotation
+    return self.average_mixture_loss(sketon_pose)
+    # return self.max_gussians_prior(sketon_pose)
 
 
 class Model:
@@ -72,9 +91,9 @@ class Model:
           np.zeros((1, 10)), name="shapes", dtype=tf.float32)
 
     with tf.variable_scope('CameraParams'):
-      # camera, shape: [1, 3], value per sample: [s/f, tx, ty]
+      # camera, shape: [1, 3], value per sample: [f/s, tx, ty]
       initial_cams = np.zeros([1, 3])
-      initial_cams[0] = [200, 0.4, 0.5]
+      initial_cams[0] = [240, 0.4, 0.5]
       self.cams = tf.Variable(
           initial_cams, name='cameras', dtype=tf.float32)
 
@@ -131,7 +150,8 @@ class Model:
     self.learning_rate = tf.Variable(0.001, trainable=False)
 
     # minimize the loss wrt cameras, poses and shapes
-    optimizer_all = tf.train.GradientDescentOptimizer(self.learning_rate)
+    # optimizer_all = tf.train.GradientDescentOptimizer(self.learning_rate)
+    optimizer_all = tf.train.AdamOptimizer(self.learning_rate)
     self.train_op_all = optimizer_all.minimize(
         self.loss_op, var_list=[self.cams, self.poses, self.shapes])
 
