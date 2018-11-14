@@ -19,19 +19,24 @@ class MaxMixtureCompletePrior:
 
   def create_prior_from_cmu(self, gaussians_params_path):
     gmm = pickle.load(open(gaussians_params_path, 'r'))
-    self.covars = tf.constant(gmm["covars"], dtype=tf.float32)
-    self.means = tf.constant(gmm["means"], dtype=tf.float32)
-    self.weights = tf.constant(gmm["weights"], dtype=tf.float32)
+    self.covars = gmm["covars"].astype(np.float32)   # shape: (8, 69, 69)
+    self.means = gmm["means"].astype(np.float32)     # shape: (8, 69)
+    self.weights = gmm["weights"].astype(np.float32) # shape: (8,)
+
     self.mvns = [tfd.MultivariateNormalFullCovariance(
-      loc=mu, covariance_matrix=cov) for (mu, cov) in zip(
-        gmm["means"], gmm["covars"])]
-    print("mvns.type:", type(self.mvns))
+      loc=mu, covariance_matrix=cov) for (mu, cov) in zip(self.means, self.covars)]
+    self.mix_gauss = tfd.Mixture(
+        cat=tfd.Categorical(probs=self.weights), components=self.mvns)
+    print("dtype(self.mvns):", self.mvns[0].dtype)
+    print("dtype(self.mix_gauss):", self.mix_gauss.dtype)
 
   def __call__(self, pose):
-    sketon_pose = pose[:, 3:] # without the global rotation
-    log_probs = tf.hstack([mvn.log_prob(sketon_pose) for mvn in self.mvns])
-    max_index = tf.argmax(log_probs, axis=1)
-    return -self.means[max_index]*log_probs[max_index]
+    # pose.shape: [N, 72]
+    sketon_pose = pose[:, 3:] # poses without the global rotation
+    print("dtype(sketon_pose):", sketon_pose.dtype)
+    loss = -self.mix_gauss.log_prob(sketon_pose)
+    loss = tf.reduce_sum(loss) # sum over batches, here we only use 1 batch
+    return loss
 
 
 class Model:
@@ -45,14 +50,12 @@ class Model:
     # 58: right elbow, 90deg bend at np.pi/2
     # 12: left knee,   90deg bend at np.pi/2
     # 15: right knee,  90deg bend at np.pi/2
-    alpha = 1
-    angle_prior_weight_default = tf.constant(4.04*1e2, dtype=tf.float32)
-    self.angle_prior_weight = tf.placeholder_with_default(
-        angle_prior_weight_default, name="angle_prior_weight", shape=[])
 
-    loss_angle = self.angle_prior_weight * alpha * (
-        tf.exp(self.poses[:, 55]) + tf.exp(-self.poses[:, 58]) +
-        tf.exp(-self.poses[:, 12]) + tf.exp(-self.poses[:, 15]))
+    # angle_prior_weight_default = tf.constant(4.04*1e2, dtype=tf.float32)
+    # self.angle_prior_weight = tf.placeholder_with_default(angle_prior_weight_default, name="angle_prior_weight", shape=[])
+    loss_angle = (tf.exp(self.poses[:, 55]) + tf.exp(-self.poses[:, 58]) +
+                  tf.exp(-self.poses[:, 12]) + tf.exp(-self.poses[:, 15]))
+    loss_angle = tf.reduce_sum(loss_angle) # sum over batches, here we only use 1 batch
     return loss_angle
 
 
@@ -79,36 +82,53 @@ class Model:
     self.proj_verts_2d = batch_orth_proj_idrot(self.verts_3d, self.cams, name='proj_verts_2d')
     self.proj_joints_2d = batch_orth_proj_idrot(self.joints_3d, self.cams, name='proj_verts_2d')
 
-    # for keypoints
-    real_keypoints_2d = tf.placeholder(
+    print("proj_verts_2d.shape", self.proj_verts_2d.shape)
+
+    # keypoints error
+    self.real_keypoints_2d = tf.placeholder(
       shape=[1, NUM_KEY_JOINTS, 2], dtype=tf.float32, name="real_keypoints_2d")
-    weights_keypoints_2d = tf.placeholder(
+    self.weights_keypoints_2d = tf.placeholder(
       shape=[1, NUM_KEY_JOINTS], dtype=tf.float32, name="weights_keypoints_2d")
 
-    weights_keypoints_2d_expanded = tf.expand_dims(weights_keypoints_2d, 2)
-    weights_keypoints_2d_expanded = tf.tile(weights_keypoints_2d_expanded, [1, 1, 2])
+    # weights_keypoints_2d_expanded = tf.expand_dims(self.weights_keypoints_2d, 2)
+    # weights_keypoints_2d_expanded = tf.tile(weights_keypoints_2d_expanded, [1, 1, 2])
 
     self.joints_loss = tf.reduce_mean(
-        weights_keypoints_2d_expanded * tf.square(real_keypoints_2d-self.proj_joints_2d), axis=1)
+        self.weights_keypoints_2d * tf.norm(self.real_keypoints_2d-self.proj_joints_2d, ord=2, axis=2))
 
     # dense points error
-    index_map = tf.placeholder(
+    self.index_map = tf.placeholder(
       shape=[1, NUM_SMPL_VERTS], dtype=tf.float32, name="visible_point_index_map")
-    img_verts = tf.placeholder(
+    self.img_verts = tf.placeholder(
       shape=[1, NUM_SMPL_VERTS, 2], dtype=tf.float32, name="real_verts_2d")
 
-    index_map_expanded = tf.expand_dims(index_map, 2)
-    index_map_expanded = tf.tile(index_map_expanded, [1, 1, 2])
+    # index_map_expanded = tf.expand_dims(self.index_map, 2)
+    # index_map_expanded = tf.tile(index_map_expanded, [1, 1, 2])
 
-    self.dense_point_loss = tf.reduce_sum(index_map_expanded * tf.square(self.proj_verts_2d - img_verts))
-    num_visible_points = tf.reduce_sum(index_map_expanded)
-    self.dense_point_loss = 0.01 * tf.divide(self.dense_point_loss, num_visible_points)
+    self.dense_point_loss = tf.reduce_sum(self.index_map * tf.norm(self.proj_verts_2d - self.img_verts, ord=2, axis=2))
+    self.num_visible_points = tf.reduce_sum(self.index_map)
+    self.dense_point_loss = tf.divide(self.dense_point_loss, self.num_visible_points)
 
+    # angle of limbs loss
     self.angle_prior_loss = self.calulate_angle_prior_loss()
-    # self.loss_op = self.dense_point_loss + self.angle_prior_loss
-    self.loss_op = self.dense_point_loss
+    # poses prior loss
+    self.gussians_prior_loss = self.gussians_prior(self.poses)
+    # shapes regulization (mean shapes are all zero)
+    self.shapes_loss = tf.reduce_sum(self.shapes)
 
-    self.learning_rate = tf.Variable(0.01, trainable=False)
+    self.all_losses = tf.stack(
+        [self.joints_loss, self.angle_prior_loss, self.gussians_prior_loss, self.shapes_loss, self.dense_point_loss])
+    print("dtype(self.all_losses):", self.all_losses.dtype, self.all_losses.shape)
+    # losses weights
+    self.losses_weights = tf.placeholder(
+      shape=[5], dtype=tf.float32, name="losses_weights")
+
+    self.all_losses_weighted = self.losses_weights * self.all_losses
+
+    # self.loss_op = self.joints_loss + self.angle_prior_loss + self.gussians_prior_loss
+    self.loss_op = self.all_losses_weighted
+
+    self.learning_rate = tf.Variable(0.001, trainable=False)
 
     # minimize the loss wrt cameras, poses and shapes
     optimizer_all = tf.train.GradientDescentOptimizer(self.learning_rate)
@@ -127,6 +147,6 @@ class Model:
     self.train_op_both_cams_poses = optimizer_both_cams_poses.minimize(
         self.loss_op, var_list=[self.cams, self.poses])
 
-    return index_map, img_verts, self.proj_verts_2d
+    return self.index_map, self.img_verts, self.proj_verts_2d
 
 

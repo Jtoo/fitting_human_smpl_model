@@ -1,7 +1,7 @@
 
 import json
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import axes3d, Axes3D 
+from mpl_toolkits.mplot3d import axes3d, Axes3D
 import numpy as np
 import pickle
 import tensorflow as tf
@@ -83,21 +83,26 @@ def main():
   # load 2d keypoints info
   keypoints_info = json.load(open("../data/icrop.json"))
   kps = np.array(keypoints_info["keypoints"])
-  kps = np.hstack((kps, [0, 0, 0]))
   kps = kps.reshape([1, -1, 3])
-  kp_weights = kps[:, :, 2]
+  kps_weights = kps[:, :, 2]
   kps = kps[:, :, :2]
   kps[:, :, 1] = 350 - kps[:, :, 1] # reverse y axis
 
-  #  [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20. 21, 22, 23]
+  #  [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
   kps_map_coco_to_smpl = (
-      -1, 11, 12, -1, 13, 14, -1, 15, 16, -1, -1, -1, -1, -1, -1, -1,  5,  6,  7,  8,  9, 10, -1, -1)
+      16, 14, 12, 11, 13, 15, 10,  8,  6,  5,  7,  9, -1, -1,  0,  1,  2,  3,  4)
+  kps_weights_mask = (
+       1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  0,  0,  1,  1,  1,  1,  1)
+  # the vertex id for the joint corresponding to the head
+  # head_id = 411
 
-  # kps = kps[:, kps_map_coco_to_smpl, :]
-  # kp_weights = kp_weights[:, kps_map_coco_to_smpl]
+  kps = kps[:, kps_map_coco_to_smpl, :]
+  mask = np.array(kps_weights_mask)
+  mask = mask.reshape([1, -1])
+  kps_weights = mask * kps_weights[:, kps_map_coco_to_smpl]
 
   print("kps:", kps.shape, kps)
-  print("kp_weights:", kp_weights.shape, kp_weights)
+  print("kps_weights:", kps_weights.shape, kps_weights)
 
   model = Model(SMPL_MODEL_PATH, "../models/gmm_08.pkl")
   (index_map, img_verts, proj_verts_2d_op) = model.build_model()
@@ -123,10 +128,10 @@ def main():
         collected_x[i] = X[i1]*w1 + X[i2]*w2 + X[i3]*w3
         collected_y[i] = Y[i1]*w1 + Y[i2]*w2 + Y[i3]*w3
 
-      print("poses: %s" % str(poses))
+      print("poses.std: %s" % str(np.std(poses)))
       print("shapes: %s" % str(shapes))
-      print("X.sum: %s" % str(np.sum(X)))
-      print("Y.sum: %s" % str(np.sum(Y)))
+      # print("X.sum: %s" % str(np.sum(X)))
+      # print("Y.sum: %s" % str(np.sum(Y)))
       print("proj_verts_2d.shape:", proj_verts_2d.shape)
 
       # Visualize the image and collected points.
@@ -150,6 +155,8 @@ def main():
       ax = fig.add_subplot(223)
       ax.imshow(Demo['ICrop'], origin="lower")
       ax.scatter(kps[0, :, 0], kps[0, :, 1], s=30, c=np.arange(len(kps[0, :, 0])))
+      for index, (px, py) in enumerate(kps[0]):
+        ax.text(px+5, py, str(index), size=12, color='r')
       ax.set_xlim([0, 350])
       ax.set_ylim([0, 350])
       plt.title('2D keypoints on the original image')
@@ -157,6 +164,8 @@ def main():
       ax = fig.add_subplot(224)
       ax.scatter(X, Y, s=0.02,c='k')
       ax.scatter(proj_joints_2d[0, :, 0], proj_joints_2d[0, :, 1], s=30, c=np.arange(len(proj_joints_2d[0, :, 0])))
+      for index, (px, py) in enumerate(proj_joints_2d[0]):
+        ax.text(px+5, py, str(index), size=12, color='r')
       ax.set_xlim([0, 350])
       ax.set_ylim([0, 350])
       plt.title('2D keypoints on the smpl model')
@@ -168,30 +177,53 @@ def main():
     show_step()
 
     for step in range(100):
-      _, lossVal = sess.run(
-          [model.train_op_cams, model.loss_op],
-          feed_dict={index_map: weight_map,
-                     img_verts: visible_points2d,
-                     model.learning_rate: 0.01})
-      print("step: %d, loss: %f" % (step, lossVal))
+      weights = [1.0, 0.0, 0.0, 0.0, 0.0]
+      feed = {model.real_keypoints_2d: kps,
+              model.weights_keypoints_2d: kps_weights,
+              index_map: weight_map,
+              img_verts: visible_points2d,
+              model.learning_rate: 0.0002,
+              model.losses_weights: weights}
+      _, lossVal, cameras = sess.run(
+          [model.train_op_cams, model.loss_op, model.cams],
+          feed_dict=feed)
+      print("step: %d, loss: %s, %s" % (step, str(lossVal), str(cameras)))
       if step % 24 == 0:
         show_step()
 
-    angle_prior_weights = [4.04 * 1e2, 4.04 * 1e2, 57.4, 4.78]
-    steps_in_all = 1000
-    for step in range(steps_in_all):
-      angle_weight = angle_prior_weights[step // (steps_in_all//len(angle_prior_weights))]
-      _, angle_prior_loss,  lossVal = sess.run(
-          [model.train_op_all, model.angle_prior_loss,  model.loss_op],
-          feed_dict={index_map: weight_map,
-                     img_verts: visible_points2d,
-                     model.learning_rate: 0.01,
-                     model.angle_prior_weight: angle_weight})
-      print("step: %d, loss: %f, angle_prior_loss: %f" % (step, lossVal, angle_prior_loss))
-
-      if step % 100 == 0:
-        show_step()
-
+    opt_weights = zip([4.04 * 1e2, 4.04 * 1e2, 57.4, 4.78],
+                      [1e2, 5 * 1e1, 1e1, .5 * 1e1])
+    steps_per_stage = 1000
+    for stage, (prior_weight, shapes_weight) in enumerate(opt_weights):
+      for step in range(steps_per_stage):
+        # kps2d, angle, gussians, shapes, dense_points
+        # weights = [1.0, 0.317*prior_weight, prior_weight, 0, 0]
+        weights = [2.0, 0.317*prior_weight, 10/((stage+1)), 0, 0.1]
+        feed = {model.real_keypoints_2d: kps,
+                model.weights_keypoints_2d: kps_weights,
+                index_map: weight_map,
+                img_verts: visible_points2d,
+                model.learning_rate: 0.0002,
+                model.losses_weights: weights}
+        (_, lossVal,
+            joints_loss,
+            angle_prior_loss,
+            gussians_prior_loss,
+            shapes_loss,
+            dense_point_loss) = sess.run([model.train_op_all,
+                                          model.loss_op,
+                                          model.joints_loss,
+                                          model.angle_prior_loss,
+                                          model.gussians_prior_loss,
+                                          model.shapes_loss,
+                                          model.dense_point_loss],
+                                         feed_dict=feed)
+        print("stage: %d, step: %d, loss: %s" % (stage, step, str(lossVal)))
+        print("kps2d: %f, angle: %f, gussians: %f, shapes_loss: %f, dense: %f" %
+              (joints_loss, angle_prior_loss, gussians_prior_loss, shapes_loss, dense_point_loss))
+        if step % 200 == 0:
+          show_step()
+    show_step()
 
 if __name__ == "__main__":
   main()
